@@ -82,28 +82,37 @@ void* producer(void* args)
 
     for(int i = 2; i <= check_till; i++)
     {
-        int k = i*i;
-        int min_index = k-1;
-        int inc_by = 1;
-        while(min_index <= m->max_number)
+        pthread_mutex_lock(&mutex);
+        if(primes[i-1]->is_prime)
         {
-            pthread_mutex_lock(readyq->mutex);
-            // wait for slave to requeue if empty
-            while(readyq->empty)
-                pthread_cond_wait(readyq->not_empty, readyq->mutex);
+            printf("[MASTER] %d is prime.\n", primes[i-1]->value);
+            pthread_mutex_unlock(&mutex);
+            int k = i*i;
+            int min_index = k-1;
+            int inc_by = (m->max_number - k) / m->chunk_size;
+            printf("[MASTER] min_index = %d, inc_by = %d\n", min_index, inc_by);
+            while(min_index < m->max_number)
+            {
+                pthread_mutex_lock(readyq->mutex);
+                // wait for slave to requeue if empty
+                while(readyq->empty)
+                    pthread_cond_wait(readyq->not_empty, readyq->mutex);
 
-            slave_t* s = dequeue(readyq);
-            pthread_mutex_lock(s->mutex);
-            s->work = 1;
-            s->k = k;
-            s->min_index = min_index;
-            s->max_index = MIN((min_index + inc_by), (m->max_number));
+                slave_t* s = dequeue(readyq);
+                pthread_mutex_lock(s->mutex);
+                s->work = 1;
+                s->k = k;
+                s->min_index = min_index;
+                s->max_index = MIN((min_index + inc_by), (m->max_number+1));
 
-            pthread_cond_signal(s->ready);
-            pthread_mutex_unlock(s->mutex);
-            pthread_mutex_unlock(readyq->mutex);
-            min_index += inc_by;
+                min_index = s->max_index;
+                pthread_cond_signal(s->ready);
+                pthread_mutex_unlock(s->mutex);
+                pthread_mutex_unlock(readyq->mutex);
+            }
         }
+        else
+            pthread_mutex_unlock(&mutex);
     }
 
     for(int i = 0; i < m->num_slaves; i++)
@@ -136,13 +145,17 @@ void* consumer(void* args)
 
         // "kill" signal from producer thread
         if(s->k < 0)
-        {
             break;
-        }
         else
         {
+            printf("[%d] Marking from [%d, %d)\n", s->id, s->min_index+1, s->max_index+1);
             for(int i = s->min_index; i < s->max_index; i+=s->k)
-                printf("[%d] Primes[%d] = %d\n", s->id, i, primes[i]->value);
+            {
+                pthread_mutex_lock(&mutex);
+                printf("[%d] Marking %d as not prime\n", s->id,  primes[i]->value);
+                primes[i]->is_prime = 0;
+                pthread_mutex_unlock(&mutex);
+            }
         }
 
         pthread_mutex_lock(s->mutex);
@@ -179,7 +192,7 @@ int main(int argc, char** argv)
         {
             primes[i] = (prime_t*)malloc(sizeof(prime_t));
             primes[i]->value = i+1;
-            primes[i]->is_prime = 0;
+            primes[i]->is_prime = 1;
         }
         pthread_mutex_init(&mutex, NULL);
 
