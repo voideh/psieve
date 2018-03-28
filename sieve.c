@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include "queue.h"
 
+#define MIN( a, b) ( a < b ) ? a : b
+
 queue_t* readyq;
 
 // struct for passing args to the producer function
@@ -22,7 +24,20 @@ typedef struct {
     int num_slaves;
 } master_t;
 
+// struct for the array of possible primes
+typedef struct {
+    int value;
+    int is_prime; // 0 = false, 1 = true
+} prime_t;
 
+prime_t** primes;
+pthread_mutex_t mutex; // mutex for prime array
+
+
+/* 
+ * Initiailizes a pointer to a slave_t which is a struct for passing messages
+ * between the master & slave.
+ */
 slave_t* sinit(int id)
 {
     slave_t* s = (slave_t*) malloc(sizeof(slave_t));
@@ -41,6 +56,7 @@ slave_t* sinit(int id)
     return s;
 }
 
+// Cleanup for the slave_t struct
 void sfree(slave_t* s)
 {
     pthread_cond_destroy(s->ready);
@@ -51,6 +67,14 @@ void sfree(slave_t* s)
     free(s);
 }
 
+/*
+ * Producer which is ran from the master thread.
+ * Performs the outerloop of the sieve.
+ *
+ * Then breaks range of k = i*i..N where N = max_number
+ * into chunk_size intervals and distributes the work to the 
+ * slave threads.
+ */
 void* producer(void* args)
 {
     master_t* m = (master_t*)args;
@@ -59,23 +83,26 @@ void* producer(void* args)
     for(int i = 2; i <= check_till; i++)
     {
         int k = i*i;
-        while(k <= m->max_number)
+        int min_index = k-1;
+        int inc_by = 1;
+        while(min_index <= m->max_number)
         {
             pthread_mutex_lock(readyq->mutex);
+            // wait for slave to requeue if empty
             while(readyq->empty)
                 pthread_cond_wait(readyq->not_empty, readyq->mutex);
-            pthread_mutex_unlock(readyq->mutex);
 
-            pthread_mutex_lock(readyq->mutex);
             slave_t* s = dequeue(readyq);
             pthread_mutex_lock(s->mutex);
-            printf("[MASTER] sending %d %d\n", s->id, k);
             s->work = 1;
             s->k = k;
+            s->min_index = min_index;
+            s->max_index = MIN((min_index + inc_by), (m->max_number));
+
             pthread_cond_signal(s->ready);
-            k += k;
             pthread_mutex_unlock(s->mutex);
             pthread_mutex_unlock(readyq->mutex);
+            min_index += inc_by;
         }
     }
 
@@ -91,7 +118,6 @@ void* producer(void* args)
         s->work = 1;
         s->k = -1;
         pthread_cond_signal(s->ready);
-        printf("[MASTER] Sending %d kill signal.\n", s->id);
         pthread_mutex_unlock(s->mutex);
     }
 
@@ -104,7 +130,6 @@ void* consumer(void* args)
     while(1)
     { 
         pthread_mutex_lock(s->mutex);
-        printf("[%d] waiting for work...\n", s->id);
         while(!s->work)
             pthread_cond_wait(s->ready, s->mutex);
         pthread_mutex_unlock(s->mutex);
@@ -112,11 +137,13 @@ void* consumer(void* args)
         // "kill" signal from producer thread
         if(s->k < 0)
         {
-            printf("[%d] Got kill signal.\n", s->id);
             break;
         }
         else
-            printf("[%d] got %d\n", s->id, s->k);
+        {
+            for(int i = s->min_index; i < s->max_index; i+=s->k)
+                printf("[%d] Primes[%d] = %d\n", s->id, i, primes[i]->value);
+        }
 
         pthread_mutex_lock(s->mutex);
         s->work = 0;
@@ -147,6 +174,15 @@ int main(int argc, char** argv)
         pthread_t master;
         pthread_t slaves[num_slaves];
 
+        primes = (prime_t**)malloc(sizeof(prime_t*) * (max_number - 1));
+        for(int i = 0; i < max_number; i++)
+        {
+            primes[i] = (prime_t*)malloc(sizeof(prime_t));
+            primes[i]->value = i+1;
+            primes[i]->is_prime = 0;
+        }
+        pthread_mutex_init(&mutex, NULL);
+
         slave_t** slaveargs;
         master_t* masterargs;
 
@@ -175,9 +211,13 @@ int main(int argc, char** argv)
             pthread_join(slaves[i], NULL);
         pthread_join(master, NULL);
 
+        pthread_mutex_destroy(&mutex);
         for(int i = 0; i < num_slaves; i++)
             sfree(slaveargs[i]);
 
+        for(int i = 0; i < max_number; i++)
+            free(primes[i]);
+        free(primes);
         qfree(readyq);
     }
     return 0;
