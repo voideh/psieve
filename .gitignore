@@ -1,3 +1,4 @@
 *.swp
 sieve
+seq_sieve
 *.o
